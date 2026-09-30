@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="header.png" alt="Abraxas Labs — hyperswitch-unsigned-webhook" width="100%">
+  <img src="header.png" alt="Abraxas Labs - hyperswitch-unsigned-webhook" width="100%">
 </p>
 
 <p align="center">
@@ -14,154 +14,68 @@
 
 # hyperswitch-unsigned-webhook
 
-**Hyperswitch** `2026.09.21.0` — Juspay
+**Hyperswitch** `2026.09.21.0` - Juspay
 
-Unpublished Hyperswitch source finding: unsigned Worldpayxml (and BitPay/Shift4) inbound webhooks are treated as verified and consume a payment as Charged without PSync. Worldpayxml verify_webhook_source returns Ok(true). Default algorithm is NoAlgorithm.
+[`Worldpayxml::verify_webhook_source`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/hyperswitch_connectors/src/connectors/worldpayxml.rs) returns `Ok(true)` with a comment that verification is done via mTLS. There is no mTLS on this route. The function ignores the body and the headers. [`incoming.rs`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/router/src/core/webhooks/incoming.rs) then trusts `source_verified` and takes `HandleResponse` with no PSync. [`LastEvent::Settled`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/hyperswitch_connectors/src/connectors/worldpayxml/transformers.rs) maps to `PaymentIntentSuccess`. The default [`IncomingWebhook`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/hyperswitch_interfaces/src/webhooks.rs) algorithm is [`NoAlgorithm`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/common_utils/src/crypto.rs). BitPay and Shift4 inherit that. Worldpayxml does not even get that far. It short-circuits.
+
+**Unauthenticated dummy SETTLED XML marks the payment succeeded. No Worldpay capture. No client cert.**
 
 | | |
 |---|---|
-| ID | Unpublished Hyperswitch source finding #1 (no CVE yet) |
-| CWE | [CWE-345, CWE-306](https://cwe.mitre.org/data/definitions/306.html) |
+| ID | no CVE yet |
+| CWE | [CWE-345](https://cwe.mitre.org/data/definitions/345.html), [CWE-306](https://cwe.mitre.org/data/definitions/306.html) |
 | CVSS | **High: 7.5** `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N` |
 | Product | [Hyperswitch](https://github.com/juspay/hyperswitch) |
-| Affected | all versions **through 2026.09.21.0** (inclusive) |
-| Patched | vendor patch — see references |
-| Auth | unauthenticated (see source map) |
+| Affected | through **2026.09.21.0** Worldpayxml inbound webhooks |
+| Auth | unauthenticated; need merchant_id and orderCode |
 | License | [GNU Affero GPL v3.0](LICENSE) |
-| Lab | `127.0.0.1` only · vendor/client disclosure pack, not a scanner |
+| Lab | `127.0.0.1` only |
 
----
+## What an attacker can do
 
-## Advisory (from the source map)
+Need `merchant_id` (in every Hyperswitch dashboard URL) and `orderCode` equal to the attempt's `connector_transaction_id`. POST `/webhooks/{merchant_id}/worldpayxml` unsigned SETTLED. If `source_verified` were false, incoming would `Trigger` and PSync the connector. Worldpayxml never takes that path. Intent goes **Charged**. Lab: `status=succeeded`. Dummy XML. No PSP.
 
-worldpayxml.rs 1381-1392 Ok(true). incoming.rs 882-889 HandleResponse if source_verified. crypto.rs NoAlgorithm. bitpay.rs/shift4.rs inherit default verify.
+Guessing payment ids is not the bug. Forging SETTLED for an id you already saw is. Not a shell. Not a live Worldpay settlement.
 
----
+Same product, different bug: [payout confirm unbound client_secret](https://github.com/abraxas/hyperswitch-payout-confirm-secret).
 
-## Entry
+## How I found it
 
-- **Method:** `POST`
-- **Path:** `/webhooks/{merchant_id}/worldpayxml`
-- **Router:** MerchantIdAuth from path. Worldpayxml verify_webhook_source Ok(true). incoming.rs source_verified HandleResponse. lastEvent SETTLED -&gt; PaymentIntentSuccess -&gt; Charged.
-- **Notes:** Unauthenticated unpublished Hyperswitch #1 CWE-345 2026.09.21.0. Needs merchant_id in URL and connector orderCode. Witness: GET /payments/{id} status succeeded. BitPay/Shift4 NoAlgorithm same class. Not eval. Not a reverse shell. Disclose security@juspay.in, not a public GitHub issue.
+I read `Ok(true)`, then `HandleResponse` vs `Trigger`, then `Settled -> PaymentIntentSuccess`. The comment says mTLS. The lab POST has no client cert.
 
-### Call chain
+The first client that looks at this will POST the webhook against `requires_confirmation`. Incoming will not Charged a payment that has not left confirmation. Stamp the attempt, or wait until `requires_capture` / `processing`. Lab does the stamp. That stamp is a lab fixture. A live attempt already has the connector id. The webhook does not.
 
-- `POST /accounts admin_api_key=test_admin`
-- `POST /api_keys/{merchant_id}`
-- `POST /account/{merchant_id}/connectors worldpayxml`
-- `POST /payments confirm=false (then stamp connector_transaction_id + requires_capture)`
-- `POST /webhooks/{merchant_id}/worldpayxml unsigned SETTLED XML`
-- `GET /payments/{id} status=succeeded`
+Wrong turns already recorded: signed HMAC on a connector that actually verifies (this path does not); treating webhook HTTP 200 as the oracle (poll `GET /payments/{id}` until `status=succeeded`); `orderCode` that is not `connector_transaction_id`; a reverse shell. Theatre.
 
-### Lab preconditions
+Then: merchant, API key, worldpayxml MCA, payment with `confirm=false`, stamp `connector_transaction_id`, unsigned SETTLED, retrieve.
 
-- Hyperswitch v1 router
-- Merchant with worldpayxml MCA
-- Payment attempt with connector_transaction_id matching orderCode
-- Intent past confirmation (requires_capture / processing)
-
-### Witness
-
-GET /payments/{id} status=succeeded after unsigned SETTLED webhook; attempt Charged
-
-### Not success
-
-- eval/base64/system payload
-- reverse shell
-- unverified webhooks only PSync
-- payment stays requires_confirmation / requires_capture
-
----
-
-## Patch / remediation
-
-**Do this first:** Apply the vendor patch for **Hyperswitch**. See references.
-
-**Verify after upgrade**
-
-- Re-run `hyperswitch-unsigned-webhook-Abraxas-Labs.py` against the patched build: the mapped witness must **not** appear.
-- Confirm the vendor advisory / changeset in the deployed tree (see references).
-- A WAF signature is delay, not a patch.
-
-**If you cannot update immediately**
-
-- Disable or isolate the affected component.
-- Hunt for the witness condition on production (new privileged users, unexpected files, injected rows — whatever this CVE's map names).
-
----
-
-## Reproduction (authorized lab)
-
-Target **only** `http://127.0.0.1:18082` (or the loopback you bound). Do not point this script at the internet.
-
-```bash
-python3 hyperswitch-unsigned-webhook-Abraxas-Labs.py
-```
-
-Success is the **witness** above in the response body. Generic 200 HTML is not it.
-
----
-
-## Lab images
-
-Loopback stack used to reproduce. Official images unless a `Dockerfile` in this folder builds from source.
-
-- [`lab/docker-compose.yml`](lab/docker-compose.yml)
-- [`lab/Dockerfile`](lab/Dockerfile)
-- [`lab/run.sh`](lab/run.sh)
-
-`./run.sh` clones Hyperswitch tag **2026.09.21.0** into `lab/hyperswitch-src` and starts `hyperswitch-router:standalone` on loopback `:18082`. Then:
+## Lab
 
 ```bash
 cd lab
 ./run.sh
 ```
 
-Publish nothing except `127.0.0.1`.
+Target **only** `http://127.0.0.1:18082`. `run.sh` clones tag **2026.09.21.0** into `lab/hyperswitch-src` for config and migrations.
 
----
+```text
+IOC status_before=requires_confirmation
+IOC webhook status=200 unsigned lastEvent=SETTLED
+IOC poll status=succeeded
+SUCCESS Hyperswitch unsigned Worldpayxml webhook Charged
+```
+
+## The fix
+
+Verify the Worldpay notify (signature / mTLS that the route actually terminates). Do not `HandleResponse` on a connector that returned `Ok(true)` from a no-op. Unsigned SETTLED must not move the intent to succeeded.
 
 ## References
 
-- [github.com/juspay/hyperswitch](https://github.com/juspay/hyperswitch) tag 2026.09.21.0
-- Vendor intake: [security@juspay.in](mailto:security@juspay.in) ([VDP](https://github.com/juspay/hyperswitch/wiki/Vulnerability-Disclosure-Program)). Do **not** open a public GitHub issue.
-
-- Abraxas Labs: [abraxaslabs.tech](https://abraxaslabs.tech) · [github.com/abraxas](https://github.com/abraxas) · [@abraxas_null](https://x.com/abraxas_null)
-
----
-
-## Records (structured)
-
-```
-# Hyperswitch unpublished #1 — unsigned Worldpayxml webhook Charged
-
-CWE: CWE-345, CWE-306
-Severity: Critical (HTTP lab SUCCESS, 95%)
-
-## Description
-
-`POST /webhooks/{merchant_id}/worldpayxml` has no HMAC. Worldpayxml `verify_webhook_source` returns `Ok(true)`. `incoming.rs` then `HandleResponse` without PSync. XML `lastEvent=SETTLED` maps to Charged.
-
-## Product
-
-Hyperswitch tag 2026.09.21.0 source; lab image `hyperswitch-router:standalone` v1.127.0. Oracle: payment `status=succeeded` after unsigned SETTLED XML. No Worldpay capture.
-```
-
----
+- [github.com/juspay/hyperswitch](https://github.com/juspay/hyperswitch) tag [2026.09.21.0](https://github.com/juspay/hyperswitch/releases/tag/2026.09.21.0)
+- [`worldpayxml.rs`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/hyperswitch_connectors/src/connectors/worldpayxml.rs) · [`transformers.rs`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/hyperswitch_connectors/src/connectors/worldpayxml/transformers.rs) · [`incoming.rs`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/router/src/core/webhooks/incoming.rs) · [`webhooks.rs`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/hyperswitch_interfaces/src/webhooks.rs) · [`crypto.rs`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/common_utils/src/crypto.rs)
+- Same product: [hyperswitch-payout-confirm-secret](https://github.com/abraxas/hyperswitch-payout-confirm-secret)
+- [CWE-345](https://cwe.mitre.org/data/definitions/345.html) · [CWE-306](https://cwe.mitre.org/data/definitions/306.html)
 
 ## License
 
-This disclosure pack is licensed under the **GNU Affero General Public License v3.0**. See [LICENSE](LICENSE).
-
----
-
-## Disclaimer
-
-This pack is for **the vendor, the site owner, and licensed labs**. The script talks to `127.0.0.1`. Using it against systems you do not own is not authorized by Abraxas Labs. No warranty.
-
-<p align="center">
-  <a href="https://abraxaslabs.tech">abraxaslabs.tech</a> ·
-  <a href="https://github.com/abraxas">github.com/abraxas</a> ·
-  <a href="https://x.com/abraxas_null">@abraxas_null</a>
-</p>
+GNU Affero GPL v3.0. See [LICENSE](LICENSE). Loopback lab only. No warranty.
