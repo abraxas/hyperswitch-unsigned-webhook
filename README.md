@@ -13,6 +13,10 @@
   &nbsp;·&nbsp;
   <a href="https://github.com/abraxas/hyperswitch-unsigned-webhook">hyperswitch-unsigned-webhook</a>
 </p>
+<p align="center">
+  Write-up: <a href="https://abraxaslabs.tech/research/hyperswitch-unsigned-webhook"><strong>https://abraxaslabs.tech/research/hyperswitch-unsigned-webhook</strong></a>
+</p>
+
 
 # hyperswitch-unsigned-webhook
 
